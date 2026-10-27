@@ -1,26 +1,44 @@
 @import "tailwindcss";
 
 :root {
-  --background: #ffffff;
-  --foreground: #171717;
+  --background: #faf7ff;
+  --foreground: #140d2b;
+  --color1: #3a1de1;
+  --color2: #6b4de9;
+  --color3: #9d7ef0;
+  --color4: #ceaef8;
+  --color5: #ffdfff;
 }
 
 @theme inline {
   --color-background: var(--background);
   --color-foreground: var(--foreground);
-  --font-sans: var(--font-geist-sans);
+  --color-color1: #3a1de1;
+  --color-color2: #6b4de9;
+  --color-color3: #9d7ef0;
+  --color-color4: #ceaef8;
+  --color-color5: #ffdfff;
+  --font-sans: var(--font-sans);
+  --font-serif: var(--font-serif);
   --font-mono: var(--font-geist-mono);
-}
-
-@media (prefers-color-scheme: dark) {
-  :root {
-    --background: #0a0a0a;
-    --foreground: #ededed;
-  }
 }
 
 body {
   background: var(--background);
   color: var(--foreground);
-  font-family: Arial, Helvetica, sans-serif;
+  font-family: var(--font-sans), system-ui, -apple-system, sans-serif;
+}
+
+.font-editorial {
+  font-family: var(--font-serif), Georgia, serif;
+}
+
+/* Garante contraste alto nos inputs e placeholders em qualquer modo do sistema */
+input, textarea, select {
+  color: #140d2b;
+}
+
+input::placeholder, textarea::placeholder {
+  color: #6e6294 !important;
+  opacity: 1 !important;
 }
