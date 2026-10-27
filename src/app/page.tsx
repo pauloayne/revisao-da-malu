@@ -90,19 +90,23 @@ export default function RevisaoDaMalu() {
 
   // Estado do Calendário de Provas Agendadas
   const [scheduledExams, setScheduledExams] = useState<ScheduledExam[]>([]);
-  const [selectedCalendarDate, setSelectedCalendarDate] = useState<string>(() => {
-    const today = new Date();
-    return `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, '0')}-${String(today.getDate()).padStart(2, '0')}`;
-  });
-  const [calendarMonth, setCalendarMonth] = useState<Date>(() => {
-    const today = new Date();
-    return new Date(today.getFullYear(), today.getMonth(), 1);
+  const [todayIso, setTodayIso] = useState<string>('2026-10-27');
+  const [selectedCalendarDate, setSelectedCalendarDate] = useState<string>('2026-10-27');
+  const [calendarMonth, setCalendarMonth] = useState<{ year: number; month: number }>({
+    year: 2026,
+    month: 9
   });
   const [saveSuccessMsg, setSaveSuccessMsg] = useState<string | null>(null);
   const [activeScheduledExamId, setActiveScheduledExamId] = useState<string | null>(null);
 
-  // Carregar provas agendadas do localStorage
+  // Inicializar data atual no cliente e carregar provas agendadas do localStorage
   useEffect(() => {
+    const now = new Date();
+    const iso = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`;
+    setTodayIso(iso);
+    setSelectedCalendarDate(iso);
+    setCalendarMonth({ year: now.getFullYear(), month: now.getMonth() });
+
     try {
       const raw = localStorage.getItem('malu_scheduled_exams_v1');
       if (raw) {
@@ -427,12 +431,28 @@ export default function RevisaoDaMalu() {
     return `${d}/${m}/${y}`;
   };
 
+  // Matemática pura de calendário (evita qualquer chamada a `new Date()` durante o pré-render do Next.js 16)
+  const toSerialDay = (y: number, m: number, d: number) => {
+    const a = Math.floor((14 - m) / 12);
+    const y2 = y + 4800 - a;
+    const m2 = m + 12 * a - 3;
+    return (
+      d +
+      Math.floor((153 * m2 + 2) / 5) +
+      365 * y2 +
+      Math.floor(y2 / 4) -
+      Math.floor(y2 / 100) +
+      Math.floor(y2 / 400) -
+      32045
+    );
+  };
+
   const getDaysRemainingLabel = (isoDate: string) => {
-    const today = new Date();
-    today.setHours(0, 0, 0, 0);
+    const [ty, tm, td] = todayIso.split('-').map(Number);
     const [y, m, d] = isoDate.split('-').map(Number);
-    const target = new Date(y, m - 1, d);
-    const diffDays = Math.round((target.getTime() - today.getTime()) / (1000 * 60 * 60 * 24));
+    const todaySerial = toSerialDay(ty || 2026, tm || 10, td || 27);
+    const targetSerial = toSerialDay(y || 2026, m || 10, d || 27);
+    const diffDays = targetSerial - todaySerial;
     if (diffDays === 0) return { text: 'É HOJE! Boa prova, meu amor! 💜', urgent: true };
     if (diffDays === 1) return { text: 'É amanhã!', urgent: true };
     if (diffDays > 1) return { text: `Faltam ${diffDays} dias`, urgent: diffDays <= 3 };
@@ -441,21 +461,31 @@ export default function RevisaoDaMalu() {
 
   // Helpers do Grid do Calendário Mensal
   const changeCalendarMonth = (offset: number) => {
-    setCalendarMonth(prev => new Date(prev.getFullYear(), prev.getMonth() + offset, 1));
+    setCalendarMonth(prev => {
+      let nextMonth = prev.month + offset;
+      let nextYear = prev.year;
+      while (nextMonth < 0) {
+        nextMonth += 12;
+        nextYear -= 1;
+      }
+      while (nextMonth > 11) {
+        nextMonth -= 12;
+        nextYear += 1;
+      }
+      return { year: nextYear, month: nextMonth };
+    });
   };
 
-  const calendarYear = calendarMonth.getFullYear();
-  const calendarMonthIdx = calendarMonth.getMonth();
+  const calendarYear = calendarMonth.year;
+  const calendarMonthIdx = calendarMonth.month;
   const monthNamesPT = [
     'Janeiro', 'Fevereiro', 'Março', 'Abril', 'Maio', 'Junho',
     'Julho', 'Agosto', 'Setembro', 'Outubro', 'Novembro', 'Dezembro'
   ];
-  const firstDayOfWeek = new Date(calendarYear, calendarMonthIdx, 1).getDay();
-  const daysInMonth = new Date(calendarYear, calendarMonthIdx + 1, 0).getDate();
-  const todayIso = (() => {
-    const t = new Date();
-    return `${t.getFullYear()}-${String(t.getMonth() + 1).padStart(2, '0')}-${String(t.getDate()).padStart(2, '0')}`;
-  })();
+  const isLeapYear = (calendarYear % 4 === 0 && calendarYear % 100 !== 0) || calendarYear % 400 === 0;
+  const monthLengths = [31, isLeapYear ? 29 : 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+  const firstDayOfWeek = (toSerialDay(calendarYear, calendarMonthIdx + 1, 1) + 1) % 7;
+  const daysInMonth = monthLengths[calendarMonthIdx] || 30;
 
   // Perguntar ao Tutor de IA (com Streaming em tempo real)
   const handleSendMessage = async (customPrompt?: string) => {
@@ -1454,7 +1484,7 @@ export default function RevisaoDaMalu() {
                         if (e.target.value) {
                           setSelectedCalendarDate(e.target.value);
                           const [y, m] = e.target.value.split('-').map(Number);
-                          if (y && m) setCalendarMonth(new Date(y, m - 1, 1));
+                          if (y && m) setCalendarMonth({ year: y, month: m - 1 });
                         }
                       }}
                       className="px-3 py-2 rounded-xl border-2 border-[#cbbdf0] bg-[#faf7ff] text-[#140d2b] font-bold text-xs focus:outline-none focus:border-color1 cursor-pointer"
