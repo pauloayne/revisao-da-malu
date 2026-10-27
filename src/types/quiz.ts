@@ -20,3 +20,17 @@ export interface ChatMessage {
   sources?: string[];
   timestamp: string;
 }
+
+export interface ScheduledExam {
+  id: string;
+  title: string;
+  examDate: string; // YYYY-MM-DD
+  description: string;
+  summaryText?: string;
+  pdfBase64?: string | null;
+  pdfFileName?: string | null;
+  questionCount: number;
+  savedQuestions?: Question[];
+  lastScore?: number;
+  createdAt: string;
+}

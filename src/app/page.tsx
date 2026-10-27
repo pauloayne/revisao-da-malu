@@ -1,6 +1,6 @@
 'use client';
 
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { 
   BookOpen, 
   Sparkles, 
@@ -24,11 +24,16 @@ import {
   RotateCcw,
   Camera,
   Trash2,
-  FileCheck2
+  FileCheck2,
+  Calendar as CalendarIcon,
+  ChevronLeft,
+  Play,
+  Plus,
+  Clock
 } from 'lucide-react';
 import confetti from 'canvas-confetti';
 import { DEFAULT_QUESTIONS } from '../data/defaultQuestions';
-import { Question } from '../types/quiz';
+import { Question, ScheduledExam } from '../types/quiz';
 
 interface ChatMsg {
   role: 'user' | 'assistant';
@@ -82,6 +87,44 @@ export default function RevisaoDaMalu() {
   const [showBuilderDetails, setShowBuilderDetails] = useState(false);
   const [builderMode, setBuilderMode] = useState<'describe' | 'upload'>('describe');
   const [currentQuizTitle, setCurrentQuizTitle] = useState('Revisão Geral de Psicologia');
+
+  // Estado do Calendário de Provas Agendadas
+  const [scheduledExams, setScheduledExams] = useState<ScheduledExam[]>([]);
+  const [selectedCalendarDate, setSelectedCalendarDate] = useState<string>(() => {
+    const today = new Date();
+    return `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, '0')}-${String(today.getDate()).padStart(2, '0')}`;
+  });
+  const [calendarMonth, setCalendarMonth] = useState<Date>(() => {
+    const today = new Date();
+    return new Date(today.getFullYear(), today.getMonth(), 1);
+  });
+  const [saveSuccessMsg, setSaveSuccessMsg] = useState<string | null>(null);
+  const [activeScheduledExamId, setActiveScheduledExamId] = useState<string | null>(null);
+
+  // Carregar provas agendadas do localStorage
+  useEffect(() => {
+    try {
+      const raw = localStorage.getItem('malu_scheduled_exams_v1');
+      if (raw) {
+        setScheduledExams(JSON.parse(raw));
+      }
+    } catch (e) {
+      console.error('Erro ao ler calendário:', e);
+    }
+  }, []);
+
+  const persistScheduledExams = (nextList: ScheduledExam[]) => {
+    setScheduledExams(nextList);
+    try {
+      localStorage.setItem('malu_scheduled_exams_v1', JSON.stringify(nextList));
+    } catch (e) {
+      // Se o PDF for muito grande para o localStorage, salva sem o base64 pesado mas mantém as questões/resumo
+      const lightList = nextList.map(item => ({ ...item, pdfBase64: null }));
+      try {
+        localStorage.setItem('malu_scheduled_exams_v1', JSON.stringify(lightList));
+      } catch {}
+    }
+  };
 
   // Estado do Tutor IA
   const [chatMessages, setChatMessages] = useState<ChatMsg[]>([
@@ -236,6 +279,184 @@ export default function RevisaoDaMalu() {
     }
   };
 
+  // Agendar Prova no Calendário (já deixando o Quiz pronto para o dia!)
+  const handleScheduleExam = async (preGenerateQuiz: boolean) => {
+    if (!subjectTitle.trim() && !examDescription.trim() && !summaryText.trim() && !pdfBase64) {
+      setGenError('Informe a matéria/autor, o que vai cair na prova ou anexe o PDF para agendar no calendário.');
+      return;
+    }
+
+    setIsGenerating(true);
+    setGenError(null);
+    setSaveSuccessMsg(null);
+
+    const examTitle =
+      subjectTitle.trim() ||
+      (pdfFileName ? pdfFileName.replace(/\.[^/.]+$/, '') : 'Prova de Psicologia');
+
+    try {
+      let generatedQuestions: Question[] | undefined = undefined;
+
+      if (preGenerateQuiz) {
+        const res = await fetch('/api/quiz/generate', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            topic: examTitle,
+            description: examDescription,
+            summary: summaryText,
+            pdfBase64,
+            pdfFileName,
+            count: questionCount
+          })
+        });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.error || 'Erro ao preparar simulado para a agenda');
+        if (data.questions && data.questions.length > 0) {
+          generatedQuestions = data.questions;
+        }
+      }
+
+      const newExam: ScheduledExam = {
+        id: `${Date.now()}`,
+        title: examTitle,
+        examDate: selectedCalendarDate,
+        description: examDescription,
+        summaryText,
+        pdfBase64,
+        pdfFileName,
+        questionCount,
+        savedQuestions: generatedQuestions,
+        createdAt: new Date().toISOString()
+      };
+
+      const updated = [...scheduledExams, newExam].sort((a, b) => a.examDate.localeCompare(b.examDate));
+      persistScheduledExams(updated);
+
+      setSaveSuccessMsg(
+        preGenerateQuiz
+          ? `Prova "${examTitle}" agendada para ${formatDateBR(selectedCalendarDate)} com Simulado já pronto! 💜`
+          : `Prova "${examTitle}" salva no calendário para ${formatDateBR(selectedCalendarDate)}!`
+      );
+      setSubjectTitle('');
+      setExamDescription('');
+      setSummaryText('');
+      setPdfBase64(null);
+      setPdfFileName(null);
+    } catch (err: any) {
+      setGenError(err.message || 'Erro ao salvar prova na agenda.');
+    } finally {
+      setIsGenerating(false);
+    }
+  };
+
+  // Iniciar ou sortear novas questões de uma prova agendada no calendário
+  const startScheduledExamQuiz = async (exam: ScheduledExam, forceNewQuestions = false) => {
+    setSubjectTitle(exam.title);
+    setExamDescription(exam.description || '');
+    setSummaryText(exam.summaryText || '');
+    setPdfBase64(exam.pdfBase64 || null);
+    setPdfFileName(exam.pdfFileName || null);
+    setQuestionCount(exam.questionCount || 5);
+    setActiveScheduledExamId(exam.id);
+
+    // Se já tem questões prontas salvas e não pediu inéditas, abre instantaneamente!
+    if (exam.savedQuestions && exam.savedQuestions.length > 0 && !forceNewQuestions) {
+      setQuestions(exam.savedQuestions);
+      setCurrentIdx(0);
+      setSelectedOption(null);
+      setIsAnswerSubmitted(false);
+      setScore(0);
+      setIsFinished(false);
+      setCurrentQuizTitle(exam.title);
+      shufflePhotos();
+      setActiveTab('quiz');
+      return;
+    }
+
+    // Caso contrário, gera na hora com base nos conteúdos anexados daquela prova
+    setIsGenerating(true);
+    setGenError(null);
+    try {
+      const res = await fetch('/api/quiz/generate', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          topic: exam.title,
+          description: exam.description,
+          summary: exam.summaryText,
+          pdfBase64: exam.pdfBase64,
+          pdfFileName: exam.pdfFileName,
+          count: exam.questionCount || 5
+        })
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || 'Erro ao gerar quiz da prova agendada');
+
+      if (data.questions && data.questions.length > 0) {
+        const updatedList = scheduledExams.map(item =>
+          item.id === exam.id ? { ...item, savedQuestions: data.questions } : item
+        );
+        persistScheduledExams(updatedList);
+
+        setQuestions(data.questions);
+        setCurrentIdx(0);
+        setSelectedOption(null);
+        setIsAnswerSubmitted(false);
+        setScore(0);
+        setIsFinished(false);
+        setCurrentQuizTitle(exam.title);
+        shufflePhotos();
+        setActiveTab('quiz');
+      }
+    } catch (err: any) {
+      setGenError(err.message || 'Erro ao abrir simulado da prova.');
+    } finally {
+      setIsGenerating(false);
+    }
+  };
+
+  const deleteScheduledExam = (id: string) => {
+    const next = scheduledExams.filter(item => item.id !== id);
+    persistScheduledExams(next);
+  };
+
+  const formatDateBR = (isoDate: string) => {
+    const [y, m, d] = isoDate.split('-');
+    if (!y || !m || !d) return isoDate;
+    return `${d}/${m}/${y}`;
+  };
+
+  const getDaysRemainingLabel = (isoDate: string) => {
+    const today = new Date();
+    today.setHours(0, 0, 0, 0);
+    const [y, m, d] = isoDate.split('-').map(Number);
+    const target = new Date(y, m - 1, d);
+    const diffDays = Math.round((target.getTime() - today.getTime()) / (1000 * 60 * 60 * 24));
+    if (diffDays === 0) return { text: 'É HOJE! Boa prova, meu amor! 💜', urgent: true };
+    if (diffDays === 1) return { text: 'É amanhã!', urgent: true };
+    if (diffDays > 1) return { text: `Faltam ${diffDays} dias`, urgent: diffDays <= 3 };
+    return { text: `Realizada há ${Math.abs(diffDays)} dia(s)`, urgent: false };
+  };
+
+  // Helpers do Grid do Calendário Mensal
+  const changeCalendarMonth = (offset: number) => {
+    setCalendarMonth(prev => new Date(prev.getFullYear(), prev.getMonth() + offset, 1));
+  };
+
+  const calendarYear = calendarMonth.getFullYear();
+  const calendarMonthIdx = calendarMonth.getMonth();
+  const monthNamesPT = [
+    'Janeiro', 'Fevereiro', 'Março', 'Abril', 'Maio', 'Junho',
+    'Julho', 'Agosto', 'Setembro', 'Outubro', 'Novembro', 'Dezembro'
+  ];
+  const firstDayOfWeek = new Date(calendarYear, calendarMonthIdx, 1).getDay();
+  const daysInMonth = new Date(calendarYear, calendarMonthIdx + 1, 0).getDate();
+  const todayIso = (() => {
+    const t = new Date();
+    return `${t.getFullYear()}-${String(t.getMonth() + 1).padStart(2, '0')}-${String(t.getDate()).padStart(2, '0')}`;
+  })();
+
   // Perguntar ao Tutor de IA (com Streaming em tempo real)
   const handleSendMessage = async (customPrompt?: string) => {
     const textToSend = customPrompt || inputQuestion;
@@ -372,8 +593,15 @@ export default function RevisaoDaMalu() {
                   : 'text-[#3b3054] hover:text-color1 hover:bg-color5/40'
               }`}
             >
-              <UploadCloud className="w-4 h-4" />
-              Montar Prova
+              <CalendarIcon className="w-4 h-4" />
+              Calendário & Provas
+              {scheduledExams.length > 0 && (
+                <span className={`px-1.5 py-0.5 text-[10px] rounded-full font-extrabold ${
+                  activeTab === 'create' ? 'bg-white text-color1' : 'bg-color1 text-white'
+                }`}>
+                  {scheduledExams.length}
+                </span>
+              )}
             </button>
             <button
               onClick={() => setActiveTab('tutor')}
@@ -396,6 +624,96 @@ export default function RevisaoDaMalu() {
         {/* TAB 1: QUIZ */}
         {activeTab === 'quiz' && (
           <div className="space-y-7">
+            {/* Faixa Rápida de Provas Agendadas no Calendário (para quando chegar o dia ela clicar e fazer na hora) */}
+            {scheduledExams.length > 0 && (
+              <div className="bg-white rounded-3xl p-4 sm:p-5 border-2 border-[#140d2b]/15 shadow-[0_8px_24px_-12px_rgba(58,29,225,0.18)]">
+                <div className="flex flex-wrap items-center justify-between gap-2 mb-3">
+                  <div className="flex items-center gap-2">
+                    <span className="w-7 h-7 rounded-xl bg-color1 text-white flex items-center justify-center shadow-[2px_2px_0px_#140d2b]">
+                      <CalendarIcon className="w-4 h-4" />
+                    </span>
+                    <span className="text-xs sm:text-sm font-extrabold text-[#140d2b]">
+                      Suas Próximas Provas Agendadas
+                    </span>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => setActiveTab('create')}
+                    className="text-xs font-bold text-color1 hover:underline cursor-pointer flex items-center gap-1"
+                  >
+                    <Plus className="w-3.5 h-3.5" />
+                    Abrir Calendário & Agendar
+                  </button>
+                </div>
+
+                <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
+                  {scheduledExams.slice(0, 3).map((exam) => {
+                    const countdown = getDaysRemainingLabel(exam.examDate);
+                    const isActive = activeScheduledExamId === exam.id;
+                    return (
+                      <div
+                        key={exam.id}
+                        className={`p-3.5 rounded-2xl border-2 transition flex flex-col justify-between gap-3 ${
+                          isActive
+                            ? 'bg-[#f4edff] border-color1 shadow-[3px_3px_0px_#140d2b]'
+                            : 'bg-[#faf7ff] border-[#decff7] hover:border-color2'
+                        }`}
+                      >
+                        <div>
+                          <div className="flex items-center justify-between gap-2 mb-1">
+                            <span className="inline-flex items-center gap-1 text-[11px] font-extrabold text-color1 bg-color5/70 px-2 py-0.5 rounded-lg">
+                              <Clock className="w-3 h-3" />
+                              {formatDateBR(exam.examDate)}
+                            </span>
+                            <span
+                              className={`text-[10px] font-extrabold px-2 py-0.5 rounded-full ${
+                                countdown.urgent
+                                  ? 'bg-amber-300 text-[#140d2b]'
+                                  : 'bg-white text-[#4a3e6d] border border-[#decff7]'
+                              }`}
+                            >
+                              {countdown.text}
+                            </span>
+                          </div>
+                          <h4 className="font-bold text-sm text-[#140d2b] truncate mt-1">
+                            {exam.title}
+                          </h4>
+                          <p className="text-[11px] text-[#5e5282] truncate">
+                            {exam.pdfFileName
+                              ? `📄 ${exam.pdfFileName}`
+                              : exam.description
+                              ? exam.description
+                              : 'Conteúdo salvo na agenda'}
+                          </p>
+                        </div>
+
+                        <div className="flex items-center gap-2 pt-1">
+                          <button
+                            type="button"
+                            disabled={isGenerating}
+                            onClick={() => startScheduledExamQuiz(exam, false)}
+                            className="flex-1 inline-flex items-center justify-center gap-1.5 px-3 py-2 rounded-xl bg-color1 hover:bg-color2 text-white text-xs font-extrabold transition shadow-[2px_2px_0px_#140d2b] cursor-pointer disabled:opacity-50"
+                          >
+                            <Play className="w-3.5 h-3.5 fill-current" />
+                            {exam.savedQuestions?.length ? 'Fazer Quiz Pronto' : 'Gerar & Fazer Quiz'}
+                          </button>
+                          <button
+                            type="button"
+                            disabled={isGenerating}
+                            onClick={() => startScheduledExamQuiz(exam, true)}
+                            title="Sortear questões inéditas desta prova"
+                            className="p-2 rounded-xl bg-white hover:bg-color5/60 text-color1 border-2 border-[#cbbdf0] transition cursor-pointer disabled:opacity-50"
+                          >
+                            <RefreshCw className={`w-3.5 h-3.5 ${isGenerating && isActive ? 'animate-spin' : ''}`} />
+                          </button>
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+            )}
+
             {/* Hero Command Bar: Pesquisa de Assunto, Descrição da Prova ou Resumo + Polaroid Decorativa */}
             <div className="bg-[#1b113a] text-white rounded-3xl p-5 sm:p-7 border-2 border-[#140d2b] shadow-[0_12px_30px_-10px_rgba(58,29,225,0.35)] relative overflow-hidden">
               {/* Subtle accent glow inside dark banner */}
@@ -874,30 +1192,33 @@ export default function RevisaoDaMalu() {
           </div>
         )}
 
-        {/* TAB 2: MONTAR PROVA / ANEXAR RESUMO */}
+        {/* TAB 2: CALENDÁRIO DE PROVAS & PLANEJADOR DE CONTEÚDOS */}
         {activeTab === 'create' && (
-          <div className="max-w-3xl mx-auto bg-white rounded-3xl p-6 sm:p-9 border-2 border-[#140d2b]/15 shadow-[0_10px_30px_-12px_rgba(20,13,43,0.12)]">
-            <div className="flex items-center justify-between gap-4 mb-7 pb-5 border-b-2 border-[#f0e8ff]">
+          <div className="space-y-7">
+            {/* Banner de Cabeçalho do Calendário */}
+            <div className="bg-[#1b113a] text-white rounded-3xl p-5 sm:p-7 border-2 border-[#140d2b] shadow-[0_12px_30px_-10px_rgba(58,29,225,0.3)] flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4">
               <div className="flex items-start gap-4">
-                <div className="w-12 h-12 rounded-2xl bg-color1 text-white flex items-center justify-center shrink-0 shadow-[3px_3px_0px_#140d2b]">
-                  <FileText className="w-6 h-6" />
+                <div className="w-12 h-12 rounded-2xl bg-color1 text-white flex items-center justify-center shrink-0 border-2 border-color4 shadow-[3px_3px_0px_#140d2b]">
+                  <CalendarIcon className="w-6 h-6" />
                 </div>
                 <div>
-                  <h2 className="font-editorial text-2xl font-bold text-[#140d2b]">
-                    Planejador de Prova Personalizada
+                  <span className="text-[11px] font-extrabold uppercase tracking-widest text-color4">
+                    Organização de Semestre da Malu
+                  </span>
+                  <h2 className="font-editorial text-2xl sm:text-3xl font-bold text-white mt-0.5">
+                    Calendário de Provas & Conteúdos
                   </h2>
-                  <p className="text-sm text-[#4a3e6d] font-medium mt-1">
-                    Sem resumo? Basta colocar o autor/tema (ex: Nietzsche) e contar o que o professor vai cobrar na prova. Se tiver resumo, pode anexar junto!
+                  <p className="text-xs sm:text-sm text-color5/90 font-medium mt-1 max-w-2xl">
+                    Escolha o dia da próxima prova no calendário, já deixe o PDF ou os temas anexados e o Quiz preparado. Quando chegar o dia, é só clicar em <strong>Fazer Quiz</strong>!
                   </p>
                 </div>
               </div>
 
-              {/* Subtle Polaroid in Create Tab */}
               <button
                 type="button"
                 onClick={shufflePhotos}
                 title="Trocar foto 💜"
-                className="hidden sm:block bg-[#faf7ff] p-1.5 pb-3 rounded-2xl border-2 border-color4 shadow-sm rotate-3 hover:rotate-0 transition shrink-0 cursor-pointer"
+                className="hidden sm:block bg-white p-1.5 pb-3 rounded-2xl border-2 border-[#140d2b] shadow-[3px_3px_0px_#140d2b] rotate-3 hover:rotate-0 transition shrink-0 cursor-pointer"
               >
                 <img
                   src={getPhotoUrl(33)}
@@ -907,118 +1228,376 @@ export default function RevisaoDaMalu() {
               </button>
             </div>
 
-            <form onSubmit={(e) => handleGenerateQuiz(e)} className="space-y-6">
-              <div>
-                <label className="block text-sm font-extrabold text-[#140d2b] mb-2">
-                  1. Qual é o Assunto, Filósofo, Autor ou Disciplina?
-                </label>
-                <input
-                  type="text"
-                  placeholder="Ex: Nietzsche, Psicopatologia, TCC, Behaviorismo, Psicanálise..."
-                  value={subjectTitle}
-                  onChange={(e) => setSubjectTitle(e.target.value)}
-                  className="w-full px-4 py-3.5 rounded-2xl border-2 border-[#cbbdf0] bg-[#faf7ff] text-[#140d2b] font-semibold placeholder:text-[#6e6294] placeholder:font-normal focus:bg-white focus:outline-none focus:ring-4 focus:ring-color3/25 focus:border-color1 text-sm"
-                />
-              </div>
+            <div className="grid grid-cols-1 lg:grid-cols-12 gap-7 items-start">
+              {/* COLUNA ESQUERDA (5 cols): Calendário Mensal Interativo + Lista de Provas Agendadas */}
+              <div className="lg:col-span-5 space-y-6">
+                {/* Card do Calendário Mensal */}
+                <div className="bg-white rounded-3xl p-5 sm:p-6 border-2 border-[#140d2b]/15 shadow-[0_10px_30px_-12px_rgba(20,13,43,0.12)]">
+                  <div className="flex items-center justify-between mb-4 pb-3 border-b-2 border-[#f0e8ff]">
+                    <div>
+                      <span className="text-[10px] font-extrabold uppercase tracking-widest text-color1">
+                        Selecione a data da prova
+                      </span>
+                      <h3 className="font-editorial text-xl font-bold text-[#140d2b]">
+                        {monthNamesPT[calendarMonthIdx]} {calendarYear}
+                      </h3>
+                    </div>
+                    <div className="flex items-center gap-1.5">
+                      <button
+                        type="button"
+                        onClick={() => changeCalendarMonth(-1)}
+                        className="p-2 rounded-xl bg-[#faf7ff] hover:bg-color5 text-[#140d2b] border-2 border-[#decff7] transition cursor-pointer"
+                        title="Mês anterior"
+                      >
+                        <ChevronLeft className="w-4 h-4" />
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => changeCalendarMonth(1)}
+                        className="p-2 rounded-xl bg-[#faf7ff] hover:bg-color5 text-[#140d2b] border-2 border-[#decff7] transition cursor-pointer"
+                        title="Próximo mês"
+                      >
+                        <ChevronRight className="w-4 h-4" />
+                      </button>
+                    </div>
+                  </div>
 
-              <div>
-                <label className="block text-sm font-extrabold text-[#140d2b] mb-2">
-                  2. O que vai cair na prova? <span className="text-xs font-semibold text-color1 bg-color5 px-2 py-0.5 rounded-md ml-1">Ideal quando você não tem resumo!</span>
-                </label>
-                <textarea
-                  rows={4}
-                  placeholder="Ex: Quero falar sobre Nietzsche mas não tenho resumo. A prova vai cobrar Vontade de Potência, Ressentimento, Crítica à Moral Tradicional, Amor Fati e suas pontes com a Psicologia..."
-                  value={examDescription}
-                  onChange={(e) => setExamDescription(e.target.value)}
-                  className="w-full p-4 rounded-2xl border-2 border-[#cbbdf0] bg-[#faf7ff] text-[#140d2b] font-medium placeholder:text-[#6e6294] focus:bg-white focus:outline-none focus:ring-4 focus:ring-color3/25 focus:border-color1 text-sm leading-relaxed"
-                />
-              </div>
+                  {/* Cabeçalho dos dias da semana */}
+                  <div className="grid grid-cols-7 gap-1 text-center mb-2">
+                    {['Dom', 'Seg', 'Ter', 'Qua', 'Qui', 'Sex', 'Sáb'].map((d) => (
+                      <div key={d} className="text-[11px] font-extrabold uppercase text-[#6e6294] py-1">
+                        {d}
+                      </div>
+                    ))}
+                  </div>
 
-              <div>
-                <div className="flex flex-wrap items-center justify-between gap-2 mb-2">
-                  <label className="block text-sm font-extrabold text-[#140d2b]">
-                    3. PDF da Faculdade, Slides ou Resumo <span className="text-xs font-normal text-[#6e6294]">(Opcional)</span>
-                  </label>
-                  <label className="text-xs text-white bg-color1 hover:bg-color2 font-bold cursor-pointer flex items-center gap-1.5 px-3.5 py-2 rounded-xl transition shadow-[2px_2px_0px_#140d2b]">
-                    <UploadCloud className="w-4 h-4" />
-                    Anexar PDF da Faculdade (.pdf ou .txt)
-                    <input type="file" accept=".pdf,.txt,application/pdf" onChange={handleFileUpload} className="hidden" />
-                  </label>
+                  {/* Dias do mês */}
+                  <div className="grid grid-cols-7 gap-1.5">
+                    {Array.from({ length: firstDayOfWeek }).map((_, idx) => (
+                      <div key={`empty-${idx}`} className="h-11 rounded-xl" />
+                    ))}
+
+                    {Array.from({ length: daysInMonth }).map((_, idx) => {
+                      const dayNum = idx + 1;
+                      const iso = `${calendarYear}-${String(calendarMonthIdx + 1).padStart(2, '0')}-${String(dayNum).padStart(2, '0')}`;
+                      const isSelected = selectedCalendarDate === iso;
+                      const isToday = todayIso === iso;
+                      const examsOnDay = scheduledExams.filter((e) => e.examDate === iso);
+                      const hasExam = examsOnDay.length > 0;
+
+                      return (
+                        <button
+                          key={iso}
+                          type="button"
+                          onClick={() => {
+                            setSelectedCalendarDate(iso);
+                            setSaveSuccessMsg(null);
+                          }}
+                          className={`h-11 rounded-xl flex flex-col items-center justify-center relative font-bold text-xs transition cursor-pointer border-2 ${
+                            isSelected
+                              ? 'bg-color1 text-white border-[#140d2b] shadow-[2px_2px_0px_#140d2b] scale-105 z-10'
+                              : hasExam
+                              ? 'bg-[#f3ecff] text-color1 border-color2 hover:bg-color5/70'
+                              : isToday
+                              ? 'bg-amber-50 text-[#140d2b] border-amber-400'
+                              : 'bg-[#faf7ff] text-[#261c42] border-transparent hover:border-[#cbbdf0] hover:bg-white'
+                          }`}
+                        >
+                          <span>{dayNum}</span>
+                          {hasExam && (
+                            <span
+                              className={`w-4 h-1.5 rounded-full mt-0.5 ${
+                                isSelected ? 'bg-amber-300' : 'bg-color1'
+                              }`}
+                              title={`${examsOnDay.length} prova(s) agendada(s)`}
+                            />
+                          )}
+                        </button>
+                      );
+                    })}
+                  </div>
+
+                  <div className="mt-4 pt-3 border-t border-[#f0e8ff] flex items-center justify-between text-[11px] text-[#5e5282] font-semibold">
+                    <span className="flex items-center gap-1.5">
+                      <span className="w-2.5 h-2.5 rounded-full bg-color1 inline-block" />
+                      Dia com prova agendada
+                    </span>
+                    <span>Data selecionada: <strong className="text-color1">{formatDateBR(selectedCalendarDate)}</strong></span>
+                  </div>
                 </div>
 
-                {pdfFileName && (
-                  <div className="flex items-center justify-between gap-3 p-3.5 mb-3 rounded-2xl bg-[#f3ecff] border-2 border-color1 text-[#140d2b]">
-                    <div className="flex items-center gap-3 min-w-0">
-                      <FileCheck2 className="w-6 h-6 text-color1 shrink-0" />
-                      <div className="truncate">
-                        <p className="text-[11px] font-extrabold text-color1 uppercase tracking-wider">
-                          Documento PDF pronto para leitura pela IA
-                        </p>
-                        <p className="text-sm font-bold truncate">{pdfFileName}</p>
-                      </div>
+                {/* Lista de Provas Agendadas */}
+                <div className="bg-white rounded-3xl p-5 sm:p-6 border-2 border-[#140d2b]/15 shadow-[0_10px_30px_-12px_rgba(20,13,43,0.12)]">
+                  <div className="flex items-center justify-between mb-4">
+                    <h3 className="font-editorial text-lg font-bold text-[#140d2b] flex items-center gap-2">
+                      <Sparkles className="w-4 h-4 text-color1" />
+                      Provas na Agenda ({scheduledExams.length})
+                    </h3>
+                  </div>
+
+                  {scheduledExams.length === 0 ? (
+                    <div className="p-6 rounded-2xl bg-[#faf7ff] border-2 border-dashed border-[#cbbdf0] text-center">
+                      <CalendarIcon className="w-8 h-8 text-color2 mx-auto mb-2 opacity-80" />
+                      <p className="text-sm font-bold text-[#140d2b]">
+                        Nenhuma prova agendada ainda
+                      </p>
+                      <p className="text-xs text-[#5e5282] mt-1">
+                        Escolha o dia no calendário acima e preencha os conteúdos ao lado para já deixar tudo pronto para o dia da prova!
+                      </p>
                     </div>
-                    <button
-                      type="button"
-                      onClick={clearAttachedPdf}
-                      className="inline-flex items-center gap-1 px-3 py-1.5 rounded-xl bg-white hover:bg-rose-50 text-rose-600 border border-rose-200 text-xs font-bold transition cursor-pointer shrink-0"
-                    >
-                      <Trash2 className="w-3.5 h-3.5" />
-                      Remover PDF
-                    </button>
+                  ) : (
+                    <div className="space-y-3 max-h-[420px] overflow-y-auto pr-1">
+                      {scheduledExams.map((exam) => {
+                        const countdown = getDaysRemainingLabel(exam.examDate);
+                        return (
+                          <div
+                            key={exam.id}
+                            className="p-4 rounded-2xl bg-[#faf7ff] border-2 border-[#decff7] hover:border-color1 transition space-y-3"
+                          >
+                            <div className="flex items-start justify-between gap-2">
+                              <div>
+                                <div className="flex flex-wrap items-center gap-1.5 mb-1">
+                                  <span className="text-[11px] font-extrabold px-2 py-0.5 rounded-lg bg-color1 text-white">
+                                    {formatDateBR(exam.examDate)}
+                                  </span>
+                                  <span
+                                    className={`text-[10px] font-extrabold px-2 py-0.5 rounded-full ${
+                                      countdown.urgent
+                                        ? 'bg-amber-300 text-[#140d2b]'
+                                        : 'bg-white text-[#4a3e6d] border border-[#cbbdf0]'
+                                    }`}
+                                  >
+                                    {countdown.text}
+                                  </span>
+                                  {exam.savedQuestions && exam.savedQuestions.length > 0 && (
+                                    <span className="text-[10px] font-extrabold px-2 py-0.5 rounded-full bg-emerald-100 text-emerald-900">
+                                      ⚡ {exam.savedQuestions.length} questões prontas
+                                    </span>
+                                  )}
+                                </div>
+                                <h4 className="font-bold text-base text-[#140d2b]">
+                                  {exam.title}
+                                </h4>
+                                {exam.pdfFileName && (
+                                  <p className="text-xs font-semibold text-color1 mt-0.5 flex items-center gap-1">
+                                    <FileCheck2 className="w-3.5 h-3.5" />
+                                    PDF anexado: {exam.pdfFileName}
+                                  </p>
+                                )}
+                                {exam.description && (
+                                  <p className="text-xs text-[#4a3e6d] mt-1 line-clamp-2">
+                                    {exam.description}
+                                  </p>
+                                )}
+                              </div>
+
+                              <button
+                                type="button"
+                                onClick={() => deleteScheduledExam(exam.id)}
+                                title="Excluir prova da agenda"
+                                className="p-1.5 rounded-xl text-rose-500 hover:bg-rose-50 transition cursor-pointer shrink-0"
+                              >
+                                <Trash2 className="w-4 h-4" />
+                              </button>
+                            </div>
+
+                            <div className="flex flex-wrap items-center gap-2 pt-2 border-t border-[#e9defc]">
+                              <button
+                                type="button"
+                                disabled={isGenerating}
+                                onClick={() => startScheduledExamQuiz(exam, false)}
+                                className="flex-1 inline-flex items-center justify-center gap-1.5 px-3.5 py-2.5 rounded-xl bg-color1 hover:bg-color2 text-white text-xs font-extrabold transition shadow-[2px_2px_0px_#140d2b] cursor-pointer disabled:opacity-50"
+                              >
+                                <Play className="w-3.5 h-3.5 fill-current" />
+                                {exam.savedQuestions?.length ? 'Abrir Quiz da Prova' : 'Gerar & Fazer Quiz'}
+                              </button>
+                              <button
+                                type="button"
+                                disabled={isGenerating}
+                                onClick={() => startScheduledExamQuiz(exam, true)}
+                                className="inline-flex items-center justify-center gap-1 px-3 py-2.5 rounded-xl bg-white hover:bg-color5/50 text-color1 border-2 border-[#cbbdf0] text-xs font-bold transition cursor-pointer disabled:opacity-50"
+                              >
+                                <RefreshCw className="w-3.5 h-3.5" />
+                                Novas Questões
+                              </button>
+                            </div>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  )}
+                </div>
+              </div>
+
+              {/* COLUNA DIREITA (7 cols): Formulário para Anexar Prova + Conteúdos na Data Escolhida */}
+              <div className="lg:col-span-7 bg-white rounded-3xl p-6 sm:p-8 border-2 border-[#140d2b]/15 shadow-[0_10px_30px_-12px_rgba(20,13,43,0.12)]">
+                <div className="flex flex-wrap items-center justify-between gap-3 mb-6 pb-4 border-b-2 border-[#f0e8ff]">
+                  <div>
+                    <span className="inline-flex items-center gap-1.5 text-xs font-extrabold text-color1 bg-color5/80 px-3 py-1 rounded-full">
+                      <CalendarIcon className="w-3.5 h-3.5" />
+                      Agendando para: {formatDateBR(selectedCalendarDate)}
+                    </span>
+                    <h3 className="font-editorial text-xl sm:text-2xl font-bold text-[#140d2b] mt-2">
+                      Anexar Prova & Conteúdos no Calendário
+                    </h3>
+                  </div>
+
+                  {/* Seletor rápido de data também em input nativo caso queira digitar */}
+                  <div>
+                    <label className="block text-[10px] font-extrabold uppercase tracking-wider text-[#6e6294] mb-1">
+                      Data da Prova
+                    </label>
+                    <input
+                      type="date"
+                      value={selectedCalendarDate}
+                      onChange={(e) => {
+                        if (e.target.value) {
+                          setSelectedCalendarDate(e.target.value);
+                          const [y, m] = e.target.value.split('-').map(Number);
+                          if (y && m) setCalendarMonth(new Date(y, m - 1, 1));
+                        }
+                      }}
+                      className="px-3 py-2 rounded-xl border-2 border-[#cbbdf0] bg-[#faf7ff] text-[#140d2b] font-bold text-xs focus:outline-none focus:border-color1 cursor-pointer"
+                    />
+                  </div>
+                </div>
+
+                {saveSuccessMsg && (
+                  <div className="mb-6 p-4 rounded-2xl bg-emerald-50 border-2 border-emerald-400 text-emerald-950 flex items-center justify-between gap-3">
+                    <div className="flex items-center gap-2.5 text-xs sm:text-sm font-bold">
+                      <CheckCircle2 className="w-5 h-5 text-emerald-600 shrink-0" />
+                      <span>{saveSuccessMsg}</span>
+                    </div>
                   </div>
                 )}
 
-                <textarea
-                  rows={4}
-                  placeholder="Se além do PDF você quiser colar alguma anotação de aula, slide ou texto, cole aqui..."
-                  value={summaryText}
-                  onChange={(e) => setSummaryText(e.target.value)}
-                  className="w-full p-4 rounded-2xl border-2 border-[#cbbdf0] bg-[#faf7ff] text-[#140d2b] font-medium placeholder:text-[#6e6294] focus:bg-white focus:outline-none focus:ring-4 focus:ring-color3/25 focus:border-color1 text-sm leading-relaxed"
-                />
-              </div>
+                <form onSubmit={(e) => handleGenerateQuiz(e)} className="space-y-5">
+                  <div>
+                    <label className="block text-sm font-extrabold text-[#140d2b] mb-2">
+                      1. Nome da Matéria, Prova ou Filósofo/Autor
+                    </label>
+                    <input
+                      type="text"
+                      placeholder="Ex: P1 de Psicopatologia, Prova de Nietzsche, TCC, Psicanálise..."
+                      value={subjectTitle}
+                      onChange={(e) => setSubjectTitle(e.target.value)}
+                      className="w-full px-4 py-3.5 rounded-2xl border-2 border-[#cbbdf0] bg-[#faf7ff] text-[#140d2b] font-semibold placeholder:text-[#6e6294] placeholder:font-normal focus:bg-white focus:outline-none focus:ring-4 focus:ring-color3/25 focus:border-color1 text-sm"
+                    />
+                  </div>
 
-              <div className="flex flex-col sm:flex-row items-center justify-between gap-4 pt-3 border-t-2 border-[#f0e8ff]">
-                <div className="w-full sm:w-auto">
-                  <label className="block text-xs font-extrabold uppercase tracking-wider text-[#4a3e6d] mb-1.5">
-                    Número de Questões
-                  </label>
-                  <select
-                    value={questionCount}
-                    onChange={(e) => setQuestionCount(Number(e.target.value))}
-                    className="w-full sm:w-auto px-4 py-2.5 rounded-xl border-2 border-[#cbbdf0] bg-white text-[#140d2b] font-bold text-sm focus:outline-none focus:border-color1 cursor-pointer"
-                  >
-                    <option value={3}>3 Questões rápidas</option>
-                    <option value={5}>5 Questões (Padrão)</option>
-                    <option value={8}>8 Questões aprofundadas</option>
-                    <option value={10}>10 Questões (Simulado completo)</option>
-                  </select>
-                </div>
+                  <div>
+                    <label className="block text-sm font-extrabold text-[#140d2b] mb-2">
+                      2. O que o professor disse que vai cair? <span className="text-xs font-semibold text-color1 bg-color5 px-2 py-0.5 rounded-md ml-1">Sem resumo? Só descreva!</span>
+                    </label>
+                    <textarea
+                      rows={3}
+                      placeholder="Ex: A prova vai cobrar Vontade de Potência, Ressentimento, Amor Fati em Nietzsche, ou os capítulos 1 a 4 dos slides..."
+                      value={examDescription}
+                      onChange={(e) => setExamDescription(e.target.value)}
+                      className="w-full p-4 rounded-2xl border-2 border-[#cbbdf0] bg-[#faf7ff] text-[#140d2b] font-medium placeholder:text-[#6e6294] focus:bg-white focus:outline-none focus:ring-4 focus:ring-color3/25 focus:border-color1 text-sm leading-relaxed"
+                    />
+                  </div>
 
-                <button
-                  type="submit"
-                  disabled={isGenerating}
-                  className="w-full sm:w-auto inline-flex items-center justify-center gap-2 px-8 py-3.5 rounded-2xl font-bold text-sm text-white bg-color1 hover:bg-color2 disabled:opacity-50 transition shadow-[4px_4px_0px_#140d2b] cursor-pointer"
-                >
-                  {isGenerating ? (
-                    <>
-                      <RefreshCw className="w-4 h-4 animate-spin" />
-                      Elaborando Simulado...
-                    </>
-                  ) : (
-                    <>
-                      <Sparkles className="w-4 h-4 text-color5" />
-                      Gerar Simulado Personalizado
-                    </>
+                  <div>
+                    <div className="flex flex-wrap items-center justify-between gap-2 mb-2">
+                      <label className="block text-sm font-extrabold text-[#140d2b]">
+                        3. Anexar PDF da Faculdade ou Resumo <span className="text-xs font-normal text-[#6e6294]">(Opcional)</span>
+                      </label>
+                      <label className="text-xs text-white bg-color1 hover:bg-color2 font-bold cursor-pointer flex items-center gap-1.5 px-3.5 py-2 rounded-xl transition shadow-[2px_2px_0px_#140d2b]">
+                        <UploadCloud className="w-4 h-4" />
+                        Subir PDF da Aula (.pdf ou .txt)
+                        <input type="file" accept=".pdf,.txt,application/pdf" onChange={handleFileUpload} className="hidden" />
+                      </label>
+                    </div>
+
+                    {pdfFileName && (
+                      <div className="flex items-center justify-between gap-3 p-3.5 mb-3 rounded-2xl bg-[#f3ecff] border-2 border-color1 text-[#140d2b]">
+                        <div className="flex items-center gap-3 min-w-0">
+                          <FileCheck2 className="w-6 h-6 text-color1 shrink-0" />
+                          <div className="truncate">
+                            <p className="text-[11px] font-extrabold text-color1 uppercase tracking-wider">
+                              PDF anexado para esta prova
+                            </p>
+                            <p className="text-sm font-bold truncate">{pdfFileName}</p>
+                          </div>
+                        </div>
+                        <button
+                          type="button"
+                          onClick={clearAttachedPdf}
+                          className="inline-flex items-center gap-1 px-3 py-1.5 rounded-xl bg-white hover:bg-rose-50 text-rose-600 border border-rose-200 text-xs font-bold transition cursor-pointer shrink-0"
+                        >
+                          <Trash2 className="w-3.5 h-3.5" />
+                          Remover
+                        </button>
+                      </div>
+                    )}
+
+                    <textarea
+                      rows={3}
+                      placeholder="Se quiser colar anotações de aula ou trechos extras além do PDF, cole aqui..."
+                      value={summaryText}
+                      onChange={(e) => setSummaryText(e.target.value)}
+                      className="w-full p-4 rounded-2xl border-2 border-[#cbbdf0] bg-[#faf7ff] text-[#140d2b] font-medium placeholder:text-[#6e6294] focus:bg-white focus:outline-none focus:ring-4 focus:ring-color3/25 focus:border-color1 text-sm leading-relaxed"
+                    />
+                  </div>
+
+                  <div className="pt-3 border-t-2 border-[#f0e8ff] space-y-4">
+                    <div className="flex flex-wrap items-center justify-between gap-3">
+                      <label className="text-xs font-extrabold uppercase tracking-wider text-[#4a3e6d]">
+                        Quantidade de Questões do Simulado:
+                      </label>
+                      <select
+                        value={questionCount}
+                        onChange={(e) => setQuestionCount(Number(e.target.value))}
+                        className="px-4 py-2 rounded-xl border-2 border-[#cbbdf0] bg-white text-[#140d2b] font-bold text-sm focus:outline-none focus:border-color1 cursor-pointer"
+                      >
+                        <option value={3}>3 Questões rápidas</option>
+                        <option value={5}>5 Questões (Padrão)</option>
+                        <option value={8}>8 Questões aprofundadas</option>
+                        <option value={10}>10 Questões (Simulado completo)</option>
+                      </select>
+                    </div>
+
+                    {/* Botões de Ação: Agendar para o Dia vs Fazer Agora */}
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 pt-1">
+                      <button
+                        type="button"
+                        disabled={isGenerating}
+                        onClick={() => handleScheduleExam(true)}
+                        className="inline-flex items-center justify-center gap-2 px-5 py-3.5 rounded-2xl font-extrabold text-xs sm:text-sm text-white bg-color1 hover:bg-color2 disabled:opacity-50 transition shadow-[4px_4px_0px_#140d2b] cursor-pointer"
+                      >
+                        {isGenerating ? (
+                          <>
+                            <RefreshCw className="w-4 h-4 animate-spin" />
+                            Salvando e Preparando Quiz...
+                          </>
+                        ) : (
+                          <>
+                            <CalendarIcon className="w-4 h-4 text-color5" />
+                            Agendar para {formatDateBR(selectedCalendarDate)} (Já Deixar Quiz Pronto)
+                          </>
+                        )}
+                      </button>
+
+                      <button
+                        type="submit"
+                        disabled={isGenerating}
+                        className="inline-flex items-center justify-center gap-2 px-5 py-3.5 rounded-2xl font-extrabold text-xs sm:text-sm text-[#140d2b] bg-color5 hover:bg-color4 border-2 border-[#140d2b] disabled:opacity-50 transition shadow-[3px_3px_0px_#140d2b] cursor-pointer"
+                      >
+                        <Sparkles className="w-4 h-4 text-color1" />
+                        Gerar e Treinar Agora Mesmo
+                      </button>
+                    </div>
+                  </div>
+
+                  {genError && (
+                    <div className="p-4 rounded-xl bg-rose-50 border-2 border-rose-300 text-rose-900 text-xs font-bold">
+                      {genError}
+                    </div>
                   )}
-                </button>
+                </form>
               </div>
-
-              {genError && (
-                <div className="p-4 rounded-xl bg-rose-50 border-2 border-rose-300 text-rose-900 text-xs font-bold">
-                  {genError}
-                </div>
-              )}
-            </form>
+            </div>
           </div>
         )}
 
